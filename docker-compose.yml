@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    container_name: yj-treasure-web
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      # 기존 postgres_db 컨테이너(host 5432)에 연결
+      DATABASE_URL: postgres://postgres:changeme@host.docker.internal:5432/yjtreasure
+      ADMIN_PASSWORD: in13361336
+      AUTH_SECRET: yj-treasure-local-secret
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on: []
