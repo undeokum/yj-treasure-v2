@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
   try {
     if (typeof body.code === "string" && body.code.trim() !== "") {
       await addCodeManually(body.code, tier);
-      return Response.json({ created: [body.code.trim().toUpperCase()], message: "코드가 등록되었습니다." }, { status: 201 });
+      return Response.json({ created: [body.code.trim()], message: "코드가 등록되었습니다." }, { status: 201 });
     }
 
     const count = typeof body.count === "number" ? body.count : NaN;

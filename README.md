@@ -6,7 +6,7 @@
 
 ```
 app/
-  layout.tsx                      # CDN 스크립트(Tailwind/html5-qrcode/confetti/폰트) 로딩
+  layout.tsx                      # CDN 스크립트(Tailwind/confetti/폰트) 로딩
   page.tsx                        # 전체 UI (React — 원본 UI 1:1 이식)
   globals.css                     # 픽셀 스타일
   api/treasures/route.ts          # GET 현황(+획득내역) / POST 획득 / DELETE 전체초기화(관리자)

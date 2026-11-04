@@ -12,7 +12,7 @@ export async function DELETE(
   }
 
   const { code } = await params;
-  const normalized = decodeURIComponent(code).trim().toUpperCase();
+  const normalized = decodeURIComponent(code).trim();
 
   try {
     const deleted = await deleteClaim(normalized);

@@ -30,8 +30,6 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen pb-16 bg-slate-950">
         {children}
-        {/* tesseract.js: 인쇄된 코드 텍스트 글자 인식(OCR) */}
-        <Script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" strategy="lazyOnload" />
         {/* Canvas Confetti: 등록 성공 축하 효과 */}
         <Script
           src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"

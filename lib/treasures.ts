@@ -219,7 +219,7 @@ export async function claimTreasure(
   student: { studentId: string; studentName: string; classId: string }
 ): Promise<Claim> {
   await ensureSchemaOnce();
-  const code = rawCode.trim().toUpperCase();
+  const code = rawCode.trim();
   if (!code) throw new InvalidCodeError();
 
   const existingClaims = await query<ClaimRow>`
@@ -276,9 +276,13 @@ export class AdminCodeError extends Error {
   }
 }
 
-/** 혼동하기 쉬운 문자(0/O, 1/I/L)를 뺀 8자리 랜덤 코드 생성에 사용할 문자집합 */
-const CODE_CHARSET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const CODE_LENGTH = 8;
+/**
+ * 4자리 랜덤 코드 생성에 사용할 문자집합 (영문 대문자 + 소문자 + 숫자)
+ * 학생이 헷갈리기 쉬운 문자(0/O/o, 1/l/I/i)는 뺀다.
+ */
+const CODE_CHARSET =
+  "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH = 4;
 
 function randomCode(): string {
   let out = "";
@@ -354,7 +358,7 @@ export async function createCodesForTier(
 /** 관리자 보물 등록(직접 입력): 미리 준비한 특정 코드를 t 등급으로 등록 */
 export async function addCodeManually(rawCode: string, tier: number): Promise<void> {
   await ensureSchemaOnce();
-  const code = rawCode.trim().toUpperCase();
+  const code = rawCode.trim();
   if (code.length < 3 || code.length > 32) {
     throw new AdminCodeError("코드는 3~32자로 입력해주세요.");
   }
@@ -382,7 +386,7 @@ export async function addCodeManually(rawCode: string, tier: number): Promise<vo
 /** 관리자: 미사용 코드 삭제 (실수 발급 정정) */
 export async function deleteUnusedCode(rawCode: string): Promise<boolean> {
   await ensureSchemaOnce();
-  const code = rawCode.trim().toUpperCase();
+  const code = rawCode.trim();
   const claimed = await query<{ code: string }>`
     SELECT code FROM treasure_claims WHERE code = ${code}
   `;
@@ -398,7 +402,7 @@ export async function deleteUnusedCode(rawCode: string): Promise<boolean> {
 /** 관리자: 획득 내역에서 개별 보물 취소 (코드는 재사용 가능 상태로 복귀) */
 export async function deleteClaim(rawCode: string): Promise<boolean> {
   await ensureSchemaOnce();
-  const code = rawCode.trim().toUpperCase();
+  const code = rawCode.trim();
   const rows = await query<{ code: string }>`
     DELETE FROM treasure_claims WHERE code = ${code} RETURNING code
   `;

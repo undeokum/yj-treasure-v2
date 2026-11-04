@@ -23,7 +23,7 @@ function dbUnavailable(): Response {
 
 /**
  * GET: 보물 현황(등급별 남은 개수) + 획득 내역
- * 관리자 세션이면 미사용 코드 목록도 함께 반환 (QR 인쇄/관리용)
+ * 관리자 세션이면 미사용 코드 목록도 함께 반환 (코드 인쇄/관리용)
  */
 export async function GET() {
   try {
@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
   }
 
   const rawCode = typeof body.code === "string" ? body.code : "";
-  const code = rawCode.trim().toUpperCase();
+  const code = rawCode.trim();
 
   if (!code) {
     return Response.json({ message: "보물 코드를 입력해 주세요." }, { status: 400 });

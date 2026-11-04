@@ -33,21 +33,9 @@ type StudentSession = { studentId: string; name: string };
 type StudentItemEntry = { code: string; tier: number; item: string; time: string };
 type StudentItemGroup = { studentId: string; studentName: string; classId: string; items: StudentItemEntry[] };
 type SyncStatus = "connecting" | "online" | "offline";
-type TesseractWorkerLike = {
-  recognize: (image: HTMLCanvasElement) => Promise<{ data: { text: string } }>;
-  setParameters: (params: Record<string, string>) => Promise<void>;
-  terminate: () => Promise<void>;
-};
 
 declare global {
   interface Window {
-    Tesseract?: {
-      createWorker?: (
-        langs: string,
-        oem?: number,
-        options?: Record<string, unknown>
-      ) => Promise<TesseractWorkerLike>;
-    };
     confetti?: (opts: Record<string, unknown>) => void;
   }
 }
@@ -55,46 +43,6 @@ declare global {
 const DEFAULT_PASSWORD = "abcd1234";
 const TIER_COUNTS: Record<number, number> = { 1: 3, 2: 10, 3: 10, 4: 15, 5: 39 };
 const TIER_ITEMS: Record<number, string> = { 1: "과자 가방", 2: "키링", 3: "빼빼로" };
-
-/** 글자 인식(OCR) 대상 — 코드 체계와 동일 (I·O·0·1 미사용, 8자) */
-const OCR_WHITELIST = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const OCR_CODE_PATTERN = /[ABCDEFGHJKLMNPQRSTUVWXYZ2-9]{8}/;
-
-/** 그레이스케일 대비 스트레칭 + 이진화 (저조도·역광·그림자 보정, 배경/글자 명암 자동 판정) */
-function preprocessCanvas(canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const d = img.data;
-  const n = canvas.width * canvas.height;
-  const lum = new Float32Array(n);
-  let min = 255;
-  let max = 0;
-  for (let i = 0; i < n; i++) {
-    const j = i * 4;
-    const l = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
-    lum[i] = l;
-    if (l < min) min = l;
-    if (l > max) max = l;
-  }
-  const scale = 255 / Math.max(1, max - min);
-  let darkCount = 0;
-  for (let i = 0; i < n; i++) {
-    if ((lum[i] - min) * scale < 128) darkCount++;
-  }
-  // 글자는 화면에서 소수 면 → 다수 쪽이 배경. 다수가 어두우면 반전 보정.
-  const majorityDark = darkCount > n / 2;
-  for (let i = 0; i < n; i++) {
-    const v = (lum[i] - min) * scale;
-    const black = majorityDark ? v >= 128 : v < 128;
-    const val = black ? 0 : 255;
-    const j = i * 4;
-    d[j] = val;
-    d[j + 1] = val;
-    d[j + 2] = val;
-  }
-  ctx.putImageData(img, 0, 0);
-}
 
 /** 학번 구조: 20921 = 2학년 9반 21번 (반은 0 채움 2자리) */
 function parseStudentIdClient(raw: string) {
@@ -130,7 +78,7 @@ export default function TreasureHuntPage() {
   const [mustChange, setMustChange] = useState(false);
 
   // 인증 폼 상태
-  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [authMode, setAuthMode] = useState<"login" | "signup">("signup");
   const [loginId, setLoginId] = useState("");
   const [loginPw, setLoginPw] = useState("");
   const [signupId, setSignupId] = useState("");
@@ -145,7 +93,6 @@ export default function TreasureHuntPage() {
   const [adminModalOpen, setAdminModalOpen] = useState(false);
   const [adminPassword, setAdminPassword] = useState("");
   const [mainTab, setMainTab] = useState<"register" | "classRank" | "goat">("register");
-  const [inputMode, setInputMode] = useState<"scan" | "manual">("scan");
 
   // 관리자 보물 등록 폼
   const [adminTier, setAdminTier] = useState(1);
@@ -154,19 +101,6 @@ export default function TreasureHuntPage() {
   const [adminManualCode, setAdminManualCode] = useState("");
   const [lastCreatedCodes, setLastCreatedCodes] = useState<string[] | null>(null);
   const [adminMsg, setAdminMsg] = useState<Message | null>(null);
-
-  // 카메라 (글자 인식 OCR)
-  // 글자 인식 (OCR)
-  const [isOcrScanning, setIsOcrScanning] = useState(false);
-  const [ocrPreview, setOcrPreview] = useState("");
-  const [ocrFacing, setOcrFacing] = useState<"environment" | "user">("environment");
-  const [ocrFlippable, setOcrFlippable] = useState(false);
-  const ocrFacingRef = useRef<"environment" | "user">("environment");
-  const ocrWorkerRef = useRef<TesseractWorkerLike | null>(null);
-  const ocrStreamRef = useRef<MediaStream | null>(null);
-  const ocrVideoRef = useRef<HTMLVideoElement | null>(null);
-  const ocrBusyRef = useRef(false);
-  const ocrTimerRef = useRef<number | null>(null);
 
   // 데이터
   const [claims, setClaims] = useState<Record<string, Claim>>({});
@@ -325,7 +259,7 @@ export default function TreasureHuntPage() {
     void fetch("/api/auth/logout", { method: "POST" });
     setStudent(null);
     setMustChange(false);
-    setAuthMode("login");
+    setAuthMode("signup");
     setLoginId("");
     setLoginPw("");
     setAuthMsg(null);
@@ -337,7 +271,7 @@ export default function TreasureHuntPage() {
 
   const processTreasureCode = useCallback(
     async (rawCode: string) => {
-      const code = rawCode.trim().toUpperCase();
+      const code = rawCode.trim();
 
       if (!code) {
         showMessage("보물 코드를 입력해 주세요.", "warning");
@@ -400,199 +334,11 @@ export default function TreasureHuntPage() {
 
   const submitManualCode = () => processTreasureCode(treasureCodeInput);
 
-  /* ------------------------- 카메라 제어 (글자 인식) ------------------------- */
-
-  const toggleCamera = () => {
-    void (isOcrScanning ? stopOcr() : startOcr());
-  };
-
-  /* ------------------------- 글자 인식(OCR) 카메라 ------------------------- */
-
-  const stopOcr = useCallback(async () => {
-    if (ocrTimerRef.current !== null) {
-      window.clearInterval(ocrTimerRef.current);
-      ocrTimerRef.current = null;
-    }
-    ocrBusyRef.current = false;
-    ocrStreamRef.current?.getTracks().forEach((t) => t.stop());
-    ocrStreamRef.current = null;
-    setIsOcrScanning(false);
-    setOcrPreview("");
-  }, []);
-
-  const startOcr = useCallback(async () => {
-    // 카메라 환경/권한 확인
-    if (!navigator.mediaDevices?.getUserMedia) {
-      showMessage("카메라 API를 사용할 수 없습니다. https 또는 localhost 주소로 접속해주세요.", "error");
-      return;
-    }
-    const T = window.Tesseract;
-    if (!T?.createWorker) {
-      showMessage("글자 인식 라이브러리를 불러오는 중입니다. 잠시 후 다시 눌러주세요.", "error");
-      return;
-    }
-    try {
-      const perm = await navigator.permissions?.query({ name: "camera" as PermissionName });
-      if (perm?.state === "denied") {
-        showMessage(
-          "카메라 권한이 차단돼 있습니다. 주소창 왼쪽 카메라 아이콘을 눌러 '허용'으로 바꾼 뒤 다시 시도해주세요.",
-          "error"
-        );
-        return;
-      }
-    } catch {
-      /* permissions API 미지원은 무시 */
-    }
-
-    try {
-      showMessage("글자 인식 준비 중... (OCR 엔진 최초 로드는 몇 초 걸릴 수 있어요)", "info");
-
-      // OCR 워커는 캐시해 재시작 시 재다운로드 방지
-      if (!ocrWorkerRef.current) {
-        const worker = await T.createWorker("eng");
-        await worker.setParameters({
-          tessedit_char_whitelist: OCR_WHITELIST,
-          tessedit_pageseg_mode: "7", // 한 줄 텍스트로 인식
-          user_defined_dpi: "300",
-        });
-        ocrWorkerRef.current = worker;
-      }
-
-      const facing = ocrFacingRef.current;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        // 고해상도 요청 (지원 안 하면 자연스럽게 기본값으로 폴백)
-        video: {
-          facingMode: { ideal: facing },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-      });
-      ocrStreamRef.current = stream;
-      if (ocrVideoRef.current) {
-        ocrVideoRef.current.srcObject = stream;
-        await ocrVideoRef.current.play().catch(() => {});
-      }
-      setIsOcrScanning(true);
-      showMessage("코드 글자가 네모 안에 꽉 차게 보이도록 카메라를 비춰주세요.", "info");
-
-      // 전환 가능한 카메라(전면/후면 등)가 있는지 확인
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        setOcrFlippable(
-          devices.filter((dev) => dev.kind === "videoinput" && (dev.deviceId || dev.groupId)).length > 1
-        );
-      } catch {
-        setOcrFlippable(false);
-      }
-
-      ocrTimerRef.current = window.setInterval(async () => {
-        if (ocrBusyRef.current) return;
-        const video = ocrVideoRef.current;
-        if (!video || video.readyState < 2 || !video.videoWidth) return;
-
-        ocrBusyRef.current = true;
-        try {
-          // 화면 중앙 정사각 영역을 잘라 확대해 인식
-          const C = 560;
-          const crop = document.createElement("canvas");
-          crop.width = C;
-          crop.height = C;
-          const cctx = crop.getContext("2d");
-          const worker = ocrWorkerRef.current;
-          if (!cctx || !worker) return;
-          const side = Math.min(video.videoWidth, video.videoHeight);
-          const sx = (video.videoWidth - side) / 2;
-          const sy = (video.videoHeight - side) / 2;
-          cctx.drawImage(video, sx, sy, side, side, 0, 0, C, C);
-
-          const readCanvas = async (image: HTMLCanvasElement): Promise<string> => {
-            const { data } = await worker.recognize(image);
-            return (data.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-          };
-
-          // 1차: 이진화 전처리 후 인식 (저조도·역광·배경 노이즈 보정)
-          const bin = document.createElement("canvas");
-          bin.width = C;
-          bin.height = C;
-          const bctx = bin.getContext("2d");
-          if (!bctx) return;
-          bctx.drawImage(crop, 0, 0);
-          preprocessCanvas(bin);
-          let text = await readCanvas(bin);
-
-          // 2차: 이진화가 오히려 실패한 상황(강한 그림자 등)이면 원본 영상으로 재시도
-          if (!OCR_CODE_PATTERN.test(text)) {
-            const raw = await readCanvas(crop);
-            if (raw) text = raw;
-          }
-
-          setOcrPreview(text);
-          const m = text.match(OCR_CODE_PATTERN);
-          if (m) {
-            void stopOcr();
-            void processTreasureCode(m[0]);
-          }
-        } catch (err) {
-          console.error("OCR recognition error:", err);
-        } finally {
-          ocrBusyRef.current = false;
-        }
-      }, 1000);
-    } catch (err) {
-      console.error("OCR camera start error:", err);
-      await stopOcr();
-      const raw = String((err as Error)?.message ?? err) || "";
-      if (/NotAllowedError|Permission|권한/i.test(raw)) {
-        showMessage(
-          "카메라 권한이 거부됐습니다. 브라우저 주소창의 카메라 아이콘에서 권한을 '허용'으로 바꾼 뒤 다시 시도해주세요.",
-          "error"
-        );
-      } else if (/NotFoundError/i.test(raw)) {
-        showMessage("사용 가능한 카메라가 없습니다. 직접 입력 모드를 이용해주세요.", "error");
-      } else if (/NotReadableError|TrackStart|in use/i.test(raw)) {
-        showMessage(
-          "다른 프로그램이 카메라를 사용 중입니다. 종료한 뒤 다시 시도해주세요.",
-          "error"
-        );
-      } else {
-        showMessage(`글자 인식을 시작할 수 없습니다. (${raw.slice(0, 60)})`, "error");
-      }
-    }
-  }, [processTreasureCode, stopOcr]);
-
-  /** 전면/후면 카메라 전환 (스캔 중이면 끄고 새 카메라로 재시작) */
-  const flipCamera = async () => {
-    const next = ocrFacingRef.current === "environment" ? "user" : "environment";
-    ocrFacingRef.current = next;
-    setOcrFacing(next);
-    if (isOcrScanning) {
-      await stopOcr();
-      await startOcr();
-    } else {
-      showMessage(next === "user" ? "전면 카메라로 전환했습니다." : "후면 카메라로 전환했습니다.", "info");
-    }
-  };
-
   /* ------------------------- 탭 전환 ------------------------- */
 
   const switchMainTab = (tab: "register" | "classRank" | "goat") => {
     setMainTab(tab);
-    if (tab !== "register") void stopOcr();
   };
-
-  const switchInputMode = (mode: "scan" | "manual") => {
-    setInputMode(mode);
-    void stopOcr();
-  };
-
-  // 카메라/OCR 완전 정리 (컴포넌트 언마운트 시)
-  useEffect(() => {
-    return () => {
-      if (ocrTimerRef.current !== null) window.clearInterval(ocrTimerRef.current);
-      ocrStreamRef.current?.getTracks().forEach((t) => t.stop());
-      void ocrWorkerRef.current?.terminate().catch(() => {});
-    };
-  }, []);
 
   /* ------------------------- 관리자 모드 ------------------------- */
 
@@ -747,6 +493,7 @@ export default function TreasureHuntPage() {
     }));
     let totalCount = 0;
     Object.values(claims).forEach((item) => {
+      if (!item.classId) return;
       const idx = parseInt(item.classId.replace("2-", ""), 10) - 1;
       if (list[idx]) {
         list[idx].score += item.points || 0;
@@ -838,19 +585,8 @@ export default function TreasureHuntPage() {
             </p>
           </div>
 
-          {/* 로그인 / 최초 등록 탭 */}
+          {/* 최초 등록 / 로그인 탭 */}
           <div className="flex bg-slate-950 p-1 pixel-box-sm">
-            <button
-              onClick={() => {
-                setAuthMode("login");
-                setAuthMsg(null);
-              }}
-              className={`flex-1 py-1.5 text-xs font-bold ${
-                authMode === "login" ? "bg-cyan-400 text-black" : "text-slate-400"
-              }`}
-            >
-              <i className="fa-solid fa-right-to-bracket mr-1"></i> 로그인
-            </button>
             <button
               onClick={() => {
                 setAuthMode("signup");
@@ -861,6 +597,17 @@ export default function TreasureHuntPage() {
               }`}
             >
               <i className="fa-solid fa-user-plus mr-1"></i> 처음이신가요?
+            </button>
+            <button
+              onClick={() => {
+                setAuthMode("login");
+                setAuthMsg(null);
+              }}
+              className={`flex-1 py-1.5 text-xs font-bold ${
+                authMode === "login" ? "bg-cyan-400 text-black" : "text-slate-400"
+              }`}
+            >
+              <i className="fa-solid fa-right-to-bracket mr-1"></i> 로그인
             </button>
           </div>
 
@@ -1098,7 +845,7 @@ export default function TreasureHuntPage() {
               mainTab === "register" ? "bg-cyan-400 text-black pixel-btn" : "text-slate-400"
             }`}
           >
-            <i className="fa-solid fa-qrcode"></i> 보물 등록
+            <i className="fa-solid fa-gem"></i> 보물 등록
           </button>
           <button
             onClick={() => switchMainTab("classRank")}
@@ -1183,83 +930,8 @@ export default function TreasureHuntPage() {
               )}
             </div>
 
-            {/* 서브 탭 전환 버튼 (카메라 스캔 / 직접 입력) */}
-            <div className="flex bg-slate-950 p-1 pixel-box-sm">
-              <button
-                onClick={() => switchInputMode("scan")}
-                className={`flex-1 py-1.5 text-xs font-bold ${
-                  inputMode === "scan" ? "bg-cyan-400 text-black" : "text-slate-400"
-                }`}
-              >
-                <i className="fa-solid fa-camera mr-1"></i> 카메라 스캔
-              </button>
-              <button
-                onClick={() => switchInputMode("manual")}
-                className={`flex-1 py-1.5 text-xs font-bold ${
-                  inputMode === "manual" ? "bg-cyan-400 text-black" : "text-slate-400"
-                }`}
-              >
-                <i className="fa-solid fa-keyboard mr-1"></i> 직접 입력
-              </button>
-            </div>
-
-            {/* 카메라 스캔 영역 (글자 인식) */}
-            <div className={`space-y-3 ${inputMode === "scan" ? "" : "hidden"}`}>
-              <div className="w-44 sm:w-52 max-w-full mx-auto bg-black aspect-square flex flex-col items-center justify-center pixel-box-sm border-cyan-400 overflow-hidden min-h-0 relative">
-                <video
-                  ref={ocrVideoRef}
-                  muted
-                  playsInline
-                  autoPlay
-                  className="w-full h-full object-cover"
-                ></video>
-                {isOcrScanning && (
-                  <div className="absolute inset-3 border-2 border-cyan-400/50 pointer-events-none"></div>
-                )}
-                {isOcrScanning && ocrFlippable && (
-                  <button
-                    onClick={flipCamera}
-                    className="absolute bottom-2 right-2 w-8 h-8 bg-slate-950/80 border-2 border-cyan-400 text-cyan-300 text-xs pixel-btn"
-                    aria-label="카메라 전환"
-                  >
-                    <i className="fa-solid fa-camera-rotate"></i>
-                  </button>
-                )}
-                {isOcrScanning && (
-                  <span className="absolute bottom-2 left-2 text-[9px] bg-slate-950/70 border border-slate-700 text-slate-300 px-1 py-0.5">
-                    {ocrFacing === "user" ? "전면" : "후면"}
-                  </span>
-                )}
-                {!isOcrScanning && (
-                  <div className="text-center p-2 text-slate-400">
-                    <i className="fa-solid fa-camera-retro text-2xl mb-1 block text-cyan-400"></i>
-                    <p className="text-[10px]">글자 인식 시작 버튼을 눌러주세요</p>
-                  </div>
-                )}
-              </div>
-
-              {!isOcrScanning && (
-                <p className="text-[10px] text-slate-500 text-center -mt-1">
-                  인쇄된 코드 글자가 네모 안에 꽉 차게 오도록 비춰주세요
-                </p>
-              )}
-              {isOcrScanning && (
-                <p className="text-[10px] text-center text-cyan-300 font-mono truncate">
-                  인식 중: {ocrPreview || "..."}
-                </p>
-              )}
-
-              <button
-                onClick={toggleCamera}
-                className="w-full py-3 bg-pink-500 hover:bg-pink-400 text-white font-bold text-xs pixel-btn flex items-center justify-center gap-2"
-              >
-                <i className="fa-solid fa-power-off"></i>{" "}
-                <span>{isOcrScanning ? "카메라 끄기" : "글자 인식 시작"}</span>
-              </button>
-            </div>
-
-            {/* 직접 입력 영역 */}
-            <div className={`space-y-3 ${inputMode === "manual" ? "" : "hidden"}`}>
+            {/* 보물 코드 직접 입력 */}
+            <div className="space-y-3">
               <div>
                 <label className="block text-xs text-slate-400 mb-1">
                   보물 코드 (관리자 발급 코드)
@@ -1269,9 +941,9 @@ export default function TreasureHuntPage() {
                     type="text"
                     value={treasureCodeInput}
                     onChange={(e) => setTreasureCodeInput(e.target.value)}
-                    onBlur={(e) => setTreasureCodeInput(e.target.value.toUpperCase())}
-                    placeholder="예: A7K2M9QX"
-                    className="w-full uppercase font-mono tracking-widest text-center text-base py-3 px-4 bg-slate-950 border-2 border-slate-700 text-yellow-300 focus:outline-none focus:border-cyan-400"
+                    maxLength={4}
+                    placeholder="예: kR7m"
+                    className="w-full font-mono tracking-widest text-center text-base py-3 px-4 bg-slate-950 border-2 border-slate-700 text-yellow-300 focus:outline-none focus:border-cyan-400"
                   />
                   <button
                     onClick={() => setTreasureCodeInput("")}
@@ -1515,9 +1187,9 @@ export default function TreasureHuntPage() {
                 <input
                   type="text"
                   value={adminManualCode}
-                  onChange={(e) => setAdminManualCode(e.target.value.toUpperCase())}
-                  placeholder="직접 입력할 코드 (예: ABC12345)"
-                  className="w-full uppercase font-mono text-center py-2 px-3 bg-slate-950 border-2 border-slate-700 text-yellow-300 text-sm focus:outline-none focus:border-cyan-400"
+                  onChange={(e) => setAdminManualCode(e.target.value)}
+                  placeholder="직접 입력할 코드 (예: kR7m)"
+                  className="w-full font-mono text-center py-2 px-3 bg-slate-950 border-2 border-slate-700 text-yellow-300 text-sm focus:outline-none focus:border-cyan-400"
                 />
               )}
 
