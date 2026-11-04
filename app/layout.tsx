@@ -30,8 +30,8 @@ export default function RootLayout({
       </head>
       <body className="min-h-screen pb-16 bg-slate-950">
         {children}
-        {/* html5-qrcode: 카메라 QR 스캐너 (사용자 상호작용 시에만 필요) */}
-        <Script src="https://unpkg.com/html5-qrcode" strategy="afterInteractive" />
+        {/* tesseract.js: 인쇄된 코드 텍스트 글자 인식(OCR) */}
+        <Script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js" strategy="lazyOnload" />
         {/* Canvas Confetti: 등록 성공 축하 효과 */}
         <Script
           src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"

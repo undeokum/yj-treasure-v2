@@ -33,21 +33,20 @@ type StudentSession = { studentId: string; name: string };
 type StudentItemEntry = { code: string; tier: number; item: string; time: string };
 type StudentItemGroup = { studentId: string; studentName: string; classId: string; items: StudentItemEntry[] };
 type SyncStatus = "connecting" | "online" | "offline";
-type Html5QrcodeLike = {
-  start: (
-    camera: string | Record<string, unknown>,
-    config: { fps: number; qrbox: { width: number; height: number } },
-    onSuccess: (decodedText: string) => void,
-    onError?: (msg: string) => void
-  ) => Promise<void>;
-  stop: () => Promise<void>;
-  clear: () => void;
+type TesseractWorkerLike = {
+  recognize: (image: HTMLCanvasElement) => Promise<{ data: { text: string } }>;
+  setParameters: (params: Record<string, string>) => Promise<void>;
+  terminate: () => Promise<void>;
 };
 
 declare global {
   interface Window {
-    Html5Qrcode?: (new (elementId: string) => Html5QrcodeLike) & {
-      getCameras?: () => Promise<Array<{ id: string; label: string }>>;
+    Tesseract?: {
+      createWorker?: (
+        langs: string,
+        oem?: number,
+        options?: Record<string, unknown>
+      ) => Promise<TesseractWorkerLike>;
     };
     confetti?: (opts: Record<string, unknown>) => void;
   }
@@ -56,6 +55,10 @@ declare global {
 const DEFAULT_PASSWORD = "abcd1234";
 const TIER_COUNTS: Record<number, number> = { 1: 3, 2: 10, 3: 10, 4: 15, 5: 39 };
 const TIER_ITEMS: Record<number, string> = { 1: "과자 가방", 2: "키링", 3: "빼빼로" };
+
+/** 글자 인식(OCR) 대상 — 코드 체계와 동일 (I·O·0·1 미사용, 8자) */
+const OCR_WHITELIST = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const OCR_CODE_PATTERN = /[ABCDEFGHJKLMNPQRSTUVWXYZ2-9]{8}/;
 
 /** 학번 구조: 20921 = 2학년 9반 21번 (반은 0 채움 2자리) */
 function parseStudentIdClient(raw: string) {
@@ -116,9 +119,15 @@ export default function TreasureHuntPage() {
   const [lastCreatedCodes, setLastCreatedCodes] = useState<string[] | null>(null);
   const [adminMsg, setAdminMsg] = useState<Message | null>(null);
 
-  // 카메라
-  const scannerRef = useRef<Html5QrcodeLike | null>(null);
-  const [isScanning, setIsScanning] = useState(false);
+  // 카메라 (글자 인식 OCR)
+  // 글자 인식 (OCR)
+  const [isOcrScanning, setIsOcrScanning] = useState(false);
+  const [ocrPreview, setOcrPreview] = useState("");
+  const ocrWorkerRef = useRef<TesseractWorkerLike | null>(null);
+  const ocrStreamRef = useRef<MediaStream | null>(null);
+  const ocrVideoRef = useRef<HTMLVideoElement | null>(null);
+  const ocrBusyRef = useRef(false);
+  const ocrTimerRef = useRef<number | null>(null);
 
   // 데이터
   const [claims, setClaims] = useState<Record<string, Claim>>({});
@@ -287,19 +296,6 @@ export default function TreasureHuntPage() {
 
   const showMessage = (text: string, kind: MessageKind) => setMessage({ kind, text });
 
-  const stopCamera = useCallback(async () => {
-    const scanner = scannerRef.current;
-    scannerRef.current = null;
-    setIsScanning(false);
-    if (!scanner) return;
-    try {
-      await scanner.stop();
-      scanner.clear();
-    } catch (err) {
-      console.error("Camera stop error:", err);
-    }
-  }, []);
-
   const processTreasureCode = useCallback(
     async (rawCode: string) => {
       const code = rawCode.trim().toUpperCase();
@@ -365,28 +361,37 @@ export default function TreasureHuntPage() {
 
   const submitManualCode = () => processTreasureCode(treasureCodeInput);
 
-  /* ------------------------- 카메라 제어 ------------------------- */
+  /* ------------------------- 카메라 제어 (글자 인식) ------------------------- */
 
-  const startCamera = async () => {
-    const placeholderMounted = document.getElementById("scannerPlaceholder");
-    if (placeholderMounted) placeholderMounted.classList.add("hidden");
+  const toggleCamera = () => {
+    void (isOcrScanning ? stopOcr() : startOcr());
+  };
 
-    const Html5 = window.Html5Qrcode;
-    if (!Html5) {
-      showMessage("스캐너 라이브러리를 불러오지 못했습니다. 직접 입력 모드를 이용해주세요.", "error");
-      return;
+  /* ------------------------- 글자 인식(OCR) 카메라 ------------------------- */
+
+  const stopOcr = useCallback(async () => {
+    if (ocrTimerRef.current !== null) {
+      window.clearInterval(ocrTimerRef.current);
+      ocrTimerRef.current = null;
     }
+    ocrBusyRef.current = false;
+    ocrStreamRef.current?.getTracks().forEach((t) => t.stop());
+    ocrStreamRef.current = null;
+    setIsOcrScanning(false);
+    setOcrPreview("");
+  }, []);
 
-    // HTTP(localhost 제외) 등 보안 컨텍스트 문제 — getUserMedia를 못 쓰는 환경 선차단
+  const startOcr = useCallback(async () => {
+    // 카메라 환경/권한 확인
     if (!navigator.mediaDevices?.getUserMedia) {
-      showMessage(
-        "카메라 API를 사용할 수 없습니다. https 또는 localhost 주소로 접속해주세요.",
-        "error"
-      );
+      showMessage("카메라 API를 사용할 수 없습니다. https 또는 localhost 주소로 접속해주세요.", "error");
       return;
     }
-
-    // 권한이 이미 차단된 경우 시도 전에 바로 안내 (차단 해제 방법 제시)
+    const T = window.Tesseract;
+    if (!T?.createWorker) {
+      showMessage("글자 인식 라이브러리를 불러오는 중입니다. 잠시 후 다시 눌러주세요.", "error");
+      return;
+    }
     try {
       const perm = await navigator.permissions?.query({ name: "camera" as PermissionName });
       if (perm?.state === "denied") {
@@ -397,92 +402,109 @@ export default function TreasureHuntPage() {
         return;
       }
     } catch {
-      // permissions API 미지원 브라우저는 그냥 진행
+      /* permissions API 미지원은 무시 */
     }
 
     try {
-      let scanner = new Html5("reader");
-      scannerRef.current = scanner;
+      showMessage("글자 인식 준비 중... (OCR 엔진 최초 로드는 몇 초 걸릴 수 있어요)", "info");
 
-      // 표시 박스에 맞춰 QR 스캔 영역 크기 산정
-      const readerEl = document.getElementById("reader");
-      const side = Math.max(120, Math.min(220, Math.floor((readerEl?.clientWidth ?? 240) * 0.7)));
-
-      const onSuccess = (decodedText: string) => {
-        void processTreasureCode(decodedText);
-        void stopCamera();
-      };
-
-      const startOnce = async (sc: Html5QrcodeLike, constraints: Record<string, unknown>) => {
-        await sc.start(constraints, { fps: 10, qrbox: { width: side, height: side } }, onSuccess, () => {});
-      };
-
-      // 후면 카메라를 우선 시도하되, 장치가 없으면(OverconstrainedError) 아무 카메라나 사용
-      try {
-        await startOnce(scanner, { facingMode: "environment" });
-      } catch (err1) {
-        const raw1 = String((err1 as Error)?.message ?? err1);
-        if (!/OverconstrainedError|constraint/i.test(raw1)) throw err1;
-        // 후면 카메라가 없는 장치 → 사용 가능한 카메라를 직접 선택
-        try { await scanner.stop(); } catch {}
-        try { scanner.clear(); } catch {}
-        const node = document.getElementById("reader");
-        if (node) node.innerHTML = "";
-        let nextCameras: Array<{ id: string; label: string }> = [];
-        try {
-          nextCameras = (await Html5.getCameras?.()) ?? [];
-        } catch {}
-        scanner = new Html5("reader");
-        scannerRef.current = scanner;
-        if (nextCameras.length > 0) {
-          await startOnce(scanner, { deviceId: { exact: nextCameras[0].id } });
-        } else {
-          await startOnce(scanner, {});
-        }
+      // OCR 워커는 캐시해 재시작 시 재다운로드 방지
+      if (!ocrWorkerRef.current) {
+        const worker = await T.createWorker("eng");
+        await worker.setParameters({
+          tessedit_char_whitelist: OCR_WHITELIST,
+          tessedit_pageseg_mode: "7", // 한 줄 텍스트로 인식
+        });
+        ocrWorkerRef.current = worker;
       }
 
-      setIsScanning(true);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+      });
+      ocrStreamRef.current = stream;
+      if (ocrVideoRef.current) {
+        ocrVideoRef.current.srcObject = stream;
+        await ocrVideoRef.current.play().catch(() => {});
+      }
+      setIsOcrScanning(true);
+      showMessage("코드 글자가 네모 안에 꽉 차게 보이도록 카메라를 비춰주세요.", "info");
+
+      ocrTimerRef.current = window.setInterval(async () => {
+        if (ocrBusyRef.current) return;
+        const video = ocrVideoRef.current;
+        if (!video || video.readyState < 2 || !video.videoWidth) return;
+
+        ocrBusyRef.current = true;
+        try {
+          // 화면 중앙 정사각 영역을 잘라 확대해 인식
+          const canvas = document.createElement("canvas");
+          const side = Math.min(video.videoWidth, video.videoHeight);
+          const sx = (video.videoWidth - side) / 2;
+          const sy = (video.videoHeight - side) / 2;
+          canvas.width = 480;
+          canvas.height = 480;
+          const ctx = canvas.getContext("2d");
+          const worker = ocrWorkerRef.current;
+          if (!ctx || !worker) return;
+          ctx.drawImage(video, sx, sy, side, side, 0, 0, 480, 480);
+
+          const { data } = await worker.recognize(canvas);
+          const text = (data.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+          setOcrPreview(text);
+
+          const m = text.match(OCR_CODE_PATTERN);
+          if (m) {
+            void stopOcr();
+            void processTreasureCode(m[0]);
+          }
+        } catch (err) {
+          console.error("OCR recognition error:", err);
+        } finally {
+          ocrBusyRef.current = false;
+        }
+      }, 900);
     } catch (err) {
-      console.error("Camera start error:", err);
-      scannerRef.current = null;
+      console.error("OCR camera start error:", err);
+      await stopOcr();
       const raw = String((err as Error)?.message ?? err) || "";
       if (/NotAllowedError|Permission|권한/i.test(raw)) {
         showMessage(
           "카메라 권한이 거부됐습니다. 브라우저 주소창의 카메라 아이콘에서 권한을 '허용'으로 바꾼 뒤 다시 시도해주세요.",
           "error"
         );
-      } else if (/NotFoundError|no camera|DevicesNotFound/i.test(raw)) {
-        showMessage(
-          "사용 가능한 카메라가 없습니다. 직접 입력 모드를 이용해주세요.",
-          "error"
-        );
+      } else if (/NotFoundError/i.test(raw)) {
+        showMessage("사용 가능한 카메라가 없습니다. 직접 입력 모드를 이용해주세요.", "error");
       } else if (/NotReadableError|TrackStart|in use/i.test(raw)) {
         showMessage(
           "다른 프로그램이 카메라를 사용 중입니다. 종료한 뒤 다시 시도해주세요.",
           "error"
         );
       } else {
-        showMessage(
-          `카메라를 실행할 수 없습니다. 직접 입력 모드를 이용해주세요. (${raw.slice(0, 60)})`,
-          "error"
-        );
+        showMessage(`글자 인식을 시작할 수 없습니다. (${raw.slice(0, 60)})`, "error");
       }
     }
-  };
-
-  const toggleCamera = () => (isScanning ? void stopCamera() : void startCamera());
+  }, [processTreasureCode, stopOcr]);
 
   /* ------------------------- 탭 전환 ------------------------- */
 
   const switchMainTab = (tab: "register" | "classRank" | "goat") => {
     setMainTab(tab);
-    if (tab !== "register") void stopCamera();
+    if (tab !== "register") void stopOcr();
   };
 
   const switchInputMode = (mode: "scan" | "manual") => {
     setInputMode(mode);
-    if (mode === "manual") void stopCamera();
+    void stopOcr();
   };
+
+  // 카메라/OCR 완전 정리 (컴포넌트 언마운트 시)
+  useEffect(() => {
+    return () => {
+      if (ocrTimerRef.current !== null) window.clearInterval(ocrTimerRef.current);
+      ocrStreamRef.current?.getTracks().forEach((t) => t.stop());
+      void ocrWorkerRef.current?.terminate().catch(() => {});
+    };
+  }, []);
 
   /* ------------------------- 관리자 모드 ------------------------- */
 
@@ -1093,27 +1115,44 @@ export default function TreasureHuntPage() {
               </button>
             </div>
 
-            {/* 카메라 스캔 영역 */}
+            {/* 카메라 스캔 영역 (글자 인식) */}
             <div className={`space-y-3 ${inputMode === "scan" ? "" : "hidden"}`}>
-              <div className="w-44 sm:w-52 max-w-full mx-auto bg-black aspect-square flex flex-col items-center justify-center pixel-box-sm border-cyan-400 overflow-hidden min-h-0">
-                <div id="reader" className="w-full h-full"></div>
-                {!isScanning && (
+              <div className="w-44 sm:w-52 max-w-full mx-auto bg-black aspect-square flex flex-col items-center justify-center pixel-box-sm border-cyan-400 overflow-hidden min-h-0 relative">
+                <video
+                  ref={ocrVideoRef}
+                  muted
+                  playsInline
+                  autoPlay
+                  className="w-full h-full object-cover"
+                ></video>
+                {isOcrScanning && (
+                  <div className="absolute inset-3 border-2 border-cyan-400/50 pointer-events-none"></div>
+                )}
+                {!isOcrScanning && (
                   <div className="text-center p-2 text-slate-400">
                     <i className="fa-solid fa-camera-retro text-2xl mb-1 block text-cyan-400"></i>
-                    <p className="text-[10px]">
-                      카메라 권한을 허용하고
-                      <br />
-                      카메라 켜기 버튼을 눌러주세요
-                    </p>
+                    <p className="text-[10px]">글자 인식 시작 버튼을 눌러주세요</p>
                   </div>
                 )}
               </div>
+
+              {!isOcrScanning && (
+                <p className="text-[10px] text-slate-500 text-center -mt-1">
+                  인쇄된 코드 글자가 네모 안에 꽉 차게 오도록 비춰주세요
+                </p>
+              )}
+              {isOcrScanning && (
+                <p className="text-[10px] text-center text-cyan-300 font-mono truncate">
+                  인식 중: {ocrPreview || "..."}
+                </p>
+              )}
+
               <button
                 onClick={toggleCamera}
                 className="w-full py-3 bg-pink-500 hover:bg-pink-400 text-white font-bold text-xs pixel-btn flex items-center justify-center gap-2"
               >
                 <i className="fa-solid fa-power-off"></i>{" "}
-                <span>{isScanning ? "카메라 끄기" : "카메라 켜기"}</span>
+                <span>{isOcrScanning ? "카메라 끄기" : "글자 인식 시작"}</span>
               </button>
             </div>
 

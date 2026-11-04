@@ -13,6 +13,19 @@ function getDatabaseUrl(): string {
   return url;
 }
 
+/** 연결 대상이 로컬 DB인지 판별 (localhost / Docker 내부) */
+function isLocalDatabase(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const sslmode = parsed.searchParams.get("sslmode");
+    if (sslmode === "disable") return true;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "host.docker.internal";
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Next.js 빌드 시점에는 모듈을 읽어들일 때 클라이언트 생성이 실행되지 않도록
  * 전역 캐시가 비어 있으면 프록시 객체를 반환합니다.
@@ -24,10 +37,20 @@ function getClient(): ReturnType<typeof postgres> {
   }
 
   if (process.env.DATABASE_URL) {
-    global.__db = postgres(getDatabaseUrl(), {
-      max: 10,
+    const url = getDatabaseUrl();
+    const local = isLocalDatabase(url);
+
+    global.__db = postgres(url, {
+      // 서버리스(Vercel)에는 작은 커넥션 풀이 적합
+      max: local ? 10 : 5,
       idle_timeout: 20,
       connect_timeout: 10,
+      // Neon/Supabase 등 클라우드 Postgres는 SSL 필수 → 로컬이 아니면 강제 활성화
+      ssl: local ? false : "require",
+      // PgBouncer 트랜잭션 풀링(Supabase pooler)은 prepared statement 미지원
+      prepare: local,
+      // Supabase 트랜잭션 풀러는 search_path가 비어 있으므로 public으로 고정
+      connection: { options: "-c search_path=public" },
     });
     return global.__db;
   }

@@ -6,8 +6,8 @@ services:
     ports:
       - "3001:3001"
     environment:
-      # 기존 postgres_db 컨테이너(host 5432)에 연결
-      DATABASE_URL: postgres://postgres:changeme@host.docker.internal:5432/yjtreasure
+      # Supabase 트랜잭션 풀러 연결
+      DATABASE_URL: postgresql://postgres.daawgctmfbkcgmwrbwlv:1pIaRkqn0q2EVkGI@aws-1-eu-central-1.pooler.supabase.com:6543/postgres
       ADMIN_PASSWORD: in13361336
       AUTH_SECRET: yj-treasure-local-secret
     extra_hosts:
