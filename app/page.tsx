@@ -60,6 +60,42 @@ const TIER_ITEMS: Record<number, string> = { 1: "과자 가방", 2: "키링", 3:
 const OCR_WHITELIST = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const OCR_CODE_PATTERN = /[ABCDEFGHJKLMNPQRSTUVWXYZ2-9]{8}/;
 
+/** 그레이스케일 대비 스트레칭 + 이진화 (저조도·역광·그림자 보정, 배경/글자 명암 자동 판정) */
+function preprocessCanvas(canvas: HTMLCanvasElement) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = img.data;
+  const n = canvas.width * canvas.height;
+  const lum = new Float32Array(n);
+  let min = 255;
+  let max = 0;
+  for (let i = 0; i < n; i++) {
+    const j = i * 4;
+    const l = 0.299 * d[j] + 0.587 * d[j + 1] + 0.114 * d[j + 2];
+    lum[i] = l;
+    if (l < min) min = l;
+    if (l > max) max = l;
+  }
+  const scale = 255 / Math.max(1, max - min);
+  let darkCount = 0;
+  for (let i = 0; i < n; i++) {
+    if ((lum[i] - min) * scale < 128) darkCount++;
+  }
+  // 글자는 화면에서 소수 면 → 다수 쪽이 배경. 다수가 어두우면 반전 보정.
+  const majorityDark = darkCount > n / 2;
+  for (let i = 0; i < n; i++) {
+    const v = (lum[i] - min) * scale;
+    const black = majorityDark ? v >= 128 : v < 128;
+    const val = black ? 0 : 255;
+    const j = i * 4;
+    d[j] = val;
+    d[j + 1] = val;
+    d[j + 2] = val;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
 /** 학번 구조: 20921 = 2학년 9반 21번 (반은 0 채움 2자리) */
 function parseStudentIdClient(raw: string) {
   const s = raw.trim();
@@ -123,6 +159,9 @@ export default function TreasureHuntPage() {
   // 글자 인식 (OCR)
   const [isOcrScanning, setIsOcrScanning] = useState(false);
   const [ocrPreview, setOcrPreview] = useState("");
+  const [ocrFacing, setOcrFacing] = useState<"environment" | "user">("environment");
+  const [ocrFlippable, setOcrFlippable] = useState(false);
+  const ocrFacingRef = useRef<"environment" | "user">("environment");
   const ocrWorkerRef = useRef<TesseractWorkerLike | null>(null);
   const ocrStreamRef = useRef<MediaStream | null>(null);
   const ocrVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -414,12 +453,19 @@ export default function TreasureHuntPage() {
         await worker.setParameters({
           tessedit_char_whitelist: OCR_WHITELIST,
           tessedit_pageseg_mode: "7", // 한 줄 텍스트로 인식
+          user_defined_dpi: "300",
         });
         ocrWorkerRef.current = worker;
       }
 
+      const facing = ocrFacingRef.current;
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } },
+        // 고해상도 요청 (지원 안 하면 자연스럽게 기본값으로 폴백)
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
       });
       ocrStreamRef.current = stream;
       if (ocrVideoRef.current) {
@@ -429,6 +475,16 @@ export default function TreasureHuntPage() {
       setIsOcrScanning(true);
       showMessage("코드 글자가 네모 안에 꽉 차게 보이도록 카메라를 비춰주세요.", "info");
 
+      // 전환 가능한 카메라(전면/후면 등)가 있는지 확인
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setOcrFlippable(
+          devices.filter((dev) => dev.kind === "videoinput" && (dev.deviceId || dev.groupId)).length > 1
+        );
+      } catch {
+        setOcrFlippable(false);
+      }
+
       ocrTimerRef.current = window.setInterval(async () => {
         if (ocrBusyRef.current) return;
         const video = ocrVideoRef.current;
@@ -437,21 +493,40 @@ export default function TreasureHuntPage() {
         ocrBusyRef.current = true;
         try {
           // 화면 중앙 정사각 영역을 잘라 확대해 인식
-          const canvas = document.createElement("canvas");
+          const C = 560;
+          const crop = document.createElement("canvas");
+          crop.width = C;
+          crop.height = C;
+          const cctx = crop.getContext("2d");
+          const worker = ocrWorkerRef.current;
+          if (!cctx || !worker) return;
           const side = Math.min(video.videoWidth, video.videoHeight);
           const sx = (video.videoWidth - side) / 2;
           const sy = (video.videoHeight - side) / 2;
-          canvas.width = 480;
-          canvas.height = 480;
-          const ctx = canvas.getContext("2d");
-          const worker = ocrWorkerRef.current;
-          if (!ctx || !worker) return;
-          ctx.drawImage(video, sx, sy, side, side, 0, 0, 480, 480);
+          cctx.drawImage(video, sx, sy, side, side, 0, 0, C, C);
 
-          const { data } = await worker.recognize(canvas);
-          const text = (data.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+          const readCanvas = async (image: HTMLCanvasElement): Promise<string> => {
+            const { data } = await worker.recognize(image);
+            return (data.text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+          };
+
+          // 1차: 이진화 전처리 후 인식 (저조도·역광·배경 노이즈 보정)
+          const bin = document.createElement("canvas");
+          bin.width = C;
+          bin.height = C;
+          const bctx = bin.getContext("2d");
+          if (!bctx) return;
+          bctx.drawImage(crop, 0, 0);
+          preprocessCanvas(bin);
+          let text = await readCanvas(bin);
+
+          // 2차: 이진화가 오히려 실패한 상황(강한 그림자 등)이면 원본 영상으로 재시도
+          if (!OCR_CODE_PATTERN.test(text)) {
+            const raw = await readCanvas(crop);
+            if (raw) text = raw;
+          }
+
           setOcrPreview(text);
-
           const m = text.match(OCR_CODE_PATTERN);
           if (m) {
             void stopOcr();
@@ -462,7 +537,7 @@ export default function TreasureHuntPage() {
         } finally {
           ocrBusyRef.current = false;
         }
-      }, 900);
+      }, 1000);
     } catch (err) {
       console.error("OCR camera start error:", err);
       await stopOcr();
@@ -484,6 +559,19 @@ export default function TreasureHuntPage() {
       }
     }
   }, [processTreasureCode, stopOcr]);
+
+  /** 전면/후면 카메라 전환 (스캔 중이면 끄고 새 카메라로 재시작) */
+  const flipCamera = async () => {
+    const next = ocrFacingRef.current === "environment" ? "user" : "environment";
+    ocrFacingRef.current = next;
+    setOcrFacing(next);
+    if (isOcrScanning) {
+      await stopOcr();
+      await startOcr();
+    } else {
+      showMessage(next === "user" ? "전면 카메라로 전환했습니다." : "후면 카메라로 전환했습니다.", "info");
+    }
+  };
 
   /* ------------------------- 탭 전환 ------------------------- */
 
@@ -1127,6 +1215,20 @@ export default function TreasureHuntPage() {
                 ></video>
                 {isOcrScanning && (
                   <div className="absolute inset-3 border-2 border-cyan-400/50 pointer-events-none"></div>
+                )}
+                {isOcrScanning && ocrFlippable && (
+                  <button
+                    onClick={flipCamera}
+                    className="absolute bottom-2 right-2 w-8 h-8 bg-slate-950/80 border-2 border-cyan-400 text-cyan-300 text-xs pixel-btn"
+                    aria-label="카메라 전환"
+                  >
+                    <i className="fa-solid fa-camera-rotate"></i>
+                  </button>
+                )}
+                {isOcrScanning && (
+                  <span className="absolute bottom-2 left-2 text-[9px] bg-slate-950/70 border border-slate-700 text-slate-300 px-1 py-0.5">
+                    {ocrFacing === "user" ? "전면" : "후면"}
+                  </span>
                 )}
                 {!isOcrScanning && (
                   <div className="text-center p-2 text-slate-400">
