@@ -194,24 +194,33 @@ export default function TreasureHuntPage() {
 
   const loginSubmit = async () => {
     setAuthMsg({ kind: "info", text: "확인 중..." });
-    const result = await handleLogin(loginId.trim(), loginPw);
+    const id = loginId.trim();
+    const pw = loginPw;
+    setLoginId("");
+    setLoginPw("");
+    const result = await handleLogin(id, pw);
     if (!result.ok) {
       setAuthMsg({ kind: "error", text: result.message });
       return;
     }
-    setLoginPw("");
     fetchTreasures();
   };
 
   const signupSubmit = async () => {
     setAuthMsg({ kind: "info", text: "초기 등록 중..." });
+    const id = signupId.trim();
+    const name = signupName.trim();
+    const pw = signupPw;
+    setSignupId("");
+    setSignupName("");
+    setSignupPw("");
     const res = await fetch("/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        studentId: signupId.trim(),
-        name: signupName.trim(),
-        password: signupPw,
+        studentId: id,
+        name,
+        password: pw,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -221,19 +230,22 @@ export default function TreasureHuntPage() {
     }
 
     // 등록 성공 → 자동 로그인
-    const login = await handleLogin(signupId.trim(), signupPw);
+    const login = await handleLogin(id, pw);
     if (!login.ok) {
       setAuthMode("login");
       setAuthMsg({ kind: "info", text: "초기 등록 완료! 로그인해주세요." });
       return;
     }
     setAuthMsg(null);
-    setSignupPw("");
     fetchTreasures();
   };
 
   const changePasswordSubmit = async () => {
-    if (newPw !== newPwConfirm) {
+    const pw = newPw;
+    const pwConfirm = newPwConfirm;
+    setNewPw("");
+    setNewPwConfirm("");
+    if (pw !== pwConfirm) {
       setAuthMsg({ kind: "warning", text: "새 비밀번호가 서로 일치하지 않습니다." });
       return;
     }
@@ -241,7 +253,7 @@ export default function TreasureHuntPage() {
     const res = await fetch("/api/auth/password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ newPassword: newPw }),
+      body: JSON.stringify({ newPassword: pw }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -249,8 +261,6 @@ export default function TreasureHuntPage() {
       return;
     }
     setMustChange(false);
-    setNewPw("");
-    setNewPwConfirm("");
     setAuthMsg(null);
     showMessage(`🎉 ${student?.name ?? ""} 학생, 개인 비밀번호 설정 완료! 보물찾기를 시작하세요.`, "success");
   };
@@ -277,6 +287,7 @@ export default function TreasureHuntPage() {
         showMessage("보물 코드를 입력해 주세요.", "warning");
         return;
       }
+      setTreasureCodeInput("");
 
       try {
         const res = await fetch("/api/treasures", {
@@ -323,7 +334,6 @@ export default function TreasureHuntPage() {
 
         const itemText = t.item ? `, 상품: ${t.item}` : "";
         showMessage(`🎉 ${tierLabel(t.tier)} 보물 발견! +${t.points}점${itemText}`, "success");
-        setTreasureCodeInput("");
         fetchTreasures();
       } catch {
         showMessage("서버에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.", "error");
@@ -385,11 +395,13 @@ export default function TreasureHuntPage() {
 
   const submitAdminCreate = async () => {
     setAdminMsg({ kind: "info", text: "처리 중..." });
+    const manualCode = adminManualCode;
+    setAdminManualCode("");
     try {
       const body =
         adminMode === "generate"
           ? { tier: adminTier, count: parseInt(adminCount, 10) || 0 }
-          : { tier: adminTier, code: adminManualCode };
+          : { tier: adminTier, code: manualCode };
       const res = await fetch("/api/admin/codes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -401,7 +413,6 @@ export default function TreasureHuntPage() {
         return;
       }
       setLastCreatedCodes(data.created);
-      setAdminManualCode("");
       setAdminMsg({ kind: "success", text: String(data.message) });
       fetchTreasures();
     } catch {
